@@ -1,0 +1,50 @@
+{
+  "name": "Учёт поездок",
+  "short_name": "Поездки",
+  "description": "Учёт служебных поездок инженера полевой эксплуатации базовых станций: маршруты, километраж, расход топлива и отчёты.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "id": "/field-trips-tracker",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0F172A",
+  "theme_color": "#2196F3",
+  "lang": "ru",
+  "dir": "ltr",
+  "categories": ["business", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "maskable-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Добавить поездку",
+      "short_name": "Добавить",
+      "description": "Быстро добавить новую поездку",
+      "url": "./index.html?action=add",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Статистика",
+      "short_name": "Статистика",
+      "url": "./index.html?tab=stats",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
