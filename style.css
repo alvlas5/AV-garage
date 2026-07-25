@@ -652,8 +652,8 @@ input, select, textarea { font-family: inherit; }
 
 .field-group { margin-bottom: 16px; }
 .waypoints-container { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
-.waypoint-row { display: flex; gap: 8px; align-items: flex-start; position: relative; }
-.waypoint-input-wrap { flex: 1; position: relative; }
+.waypoint-row { display: flex; gap: 8px; align-items: flex-end; }
+.waypoint-input-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; position: relative; }
 .waypoint-remove {
   border: none; background: var(--surface-alt); color: var(--color-danger);
   width: 44px; height: 44px; border-radius: var(--radius-sm);
@@ -662,9 +662,12 @@ input, select, textarea { font-family: inherit; }
 }
 .waypoint-remove:hover { background: #FBE1E1; }
 .waypoint-label {
-  position: absolute; left: 14px; top: -8px;
-  background: var(--surface); padding: 0 4px;
-  font-size: 10.5px; color: var(--on-surface-variant); font-weight: 700;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  padding-left: 2px;
 }
 
 .autocomplete-field { position: relative; }

@@ -99,6 +99,19 @@ function debounce(fn, delay) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), delay); };
 }
+// Polls for a CDN-loaded global (e.g. window.XLSX) instead of assuming it has
+// either already loaded or never will. Resolves as soon as it appears, rejects
+// on timeout so the caller can show a real error instead of an endless "loading".
+function waitForGlobal(name, timeout = 6000, interval = 200) {
+  return new Promise((resolve, reject) => {
+    if (window[name]) return resolve(window[name]);
+    const start = Date.now();
+    const timer = setInterval(() => {
+      if (window[name]) { clearInterval(timer); resolve(window[name]); }
+      else if (Date.now() - start > timeout) { clearInterval(timer); reject(new Error(`${name} unavailable`)); }
+    }, interval);
+  });
+}
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -248,12 +261,37 @@ function attachAutocomplete(input, listEl, opts = {}) {
   });
 }
 async function runAutocompleteSearch(input, listEl, q, opts) {
+  if (!navigator.onLine) {
+    listEl.innerHTML = '<div class="autocomplete-empty">Нет интернета — можно ввести название вручную, километраж указывается вручную.</div>';
+    listEl.classList.add('open');
+    return;
+  }
   if (input._acController) input._acController.abort();
   const controller = new AbortController();
   input._acController = controller;
-  const params = new URLSearchParams({ format: 'json', addressdetails: '0', limit: '6', countrycodes: 'ru' });
-  params.set('q', opts.cityMode ? `Калуга, ${q}` : q);
-  if (opts.cityMode) { params.set('viewbox', '36.05,54.40,36.45,54.65'); params.set('bounded', '1'); }
+  const params = new URLSearchParams({ format: 'json', addressdetails: '1', limit: '8', countrycodes: 'ru' });
+
+  if (opts.cityMode) {
+    // Улица (+ опционально номер дома) строго в Калуге: структурированный запрос
+    // точнее фильтрует по городу, чем свободный текст, и не путает номер дома с улицей.
+    const houseMatch = q.match(/^(.*?)[,\s]+(\d+[а-яА-Я\/]*)\s*$/);
+    if (houseMatch) {
+      params.set('street', `${houseMatch[2]} ${houseMatch[1].trim()}`);
+      params.set('city', 'Калуга');
+    } else {
+      params.set('q', `Калуга, ${q}`);
+    }
+    // левая,верхняя,правая,нижняя граница (lon_min,lat_max,lon_max,lat_min) — сама Калуга
+    params.set('viewbox', '36.05,54.65,36.45,54.40');
+    params.set('bounded', '1');
+  } else {
+    // Населённые пункты Калужской области: жёсткая привязка к границам региона,
+    // чтобы мелкие деревни не терялись среди тёзок из других областей.
+    params.set('q', `${q}, Калужская область`);
+    params.set('viewbox', '33.50,55.35,37.55,53.30');
+    params.set('bounded', '1');
+  }
+
   listEl.innerHTML = '<div class="autocomplete-empty">Поиск…</div>';
   listEl.classList.add('open');
   try {
@@ -285,6 +323,7 @@ function renderAutocompleteResults(input, listEl, items) {
       input.dataset.name = label;
       listEl.classList.remove('open');
       listEl.innerHTML = '';
+      autoCalcRoute();
     });
   });
 }
@@ -314,6 +353,7 @@ function createWaypointRow(index) {
   row.querySelector('.waypoint-remove').addEventListener('click', () => {
     row.remove();
     updateWaypointRemoveVisibility();
+    autoCalcRoute();
   });
   return row;
 }
@@ -395,9 +435,13 @@ function openTripModal(id) {
   }
   openModal(tripModal);
 }
+function closeTripModal() {
+  closeModal(tripModal);
+  editingId = null;
+}
 fabAdd.addEventListener('click', () => openTripModal(null));
-tripModalCloseBtn.addEventListener('click', () => closeModal(tripModal));
-tripCancelBtn.addEventListener('click', () => closeModal(tripModal));
+tripModalCloseBtn.addEventListener('click', closeTripModal);
+tripCancelBtn.addEventListener('click', closeTripModal);
 
 function getRoutePoints() {
   if (currentTripType === 'city') {
@@ -421,7 +465,15 @@ function showRouteStatus(msg, cls) {
 }
 async function calcRoute() {
   const points = getRoutePoints();
-  if (!points) { showRouteStatus('Выберите все пункты маршрута из списка предложений.', 'error'); return; }
+  if (!points) {
+    showRouteStatus(
+      navigator.onLine
+        ? 'Выберите все пункты маршрута из списка предложений.'
+        : 'Нет подключения к интернету — введите километраж вручную.',
+      'error'
+    );
+    return;
+  }
   calcRouteBtn.disabled = true;
   showRouteStatus('Расчёт маршрута…', '');
   try {
@@ -440,6 +492,15 @@ async function calcRoute() {
   }
 }
 calcRouteBtn.addEventListener('click', calcRoute);
+const autoCalcRoute = debounce(calcRoute, 350);
+
+// Доп. фикс: если авторасчёт маршрута выдал ошибку, а пользователь начал
+// вписывать километраж вручную — не оставляем красный текст ошибки висеть.
+tripKm.addEventListener('input', () => {
+  if (routeCalcStatus.classList.contains('error')) {
+    showRouteStatus('Километраж указан вручную.', '');
+  }
+});
 
 function saveTrip() {
   const date = tripDate.value;
@@ -448,15 +509,23 @@ function saveTrip() {
   let points;
   if (currentTripType === 'city') {
     if (!cityStreetInput.value.trim()) { showToast('Укажите улицу назначения', 'error'); return; }
-    if (!cityStreetInput.dataset.lat) { showToast('Выберите улицу из списка предложений', 'error'); return; }
-    points = [{ name: cityStreetInput.dataset.name || cityStreetInput.value, lat: +cityStreetInput.dataset.lat, lon: +cityStreetInput.dataset.lon }];
+    if (!cityStreetInput.dataset.lat) {
+      if (navigator.onLine) { showToast('Выберите улицу из списка предложений', 'error'); return; }
+      points = [{ name: cityStreetInput.value.trim(), lat: null, lon: null }];
+    } else {
+      points = [{ name: cityStreetInput.dataset.name || cityStreetInput.value, lat: +cityStreetInput.dataset.lat, lon: +cityStreetInput.dataset.lon }];
+    }
   } else {
     const rows = [...waypointsContainer.querySelectorAll('.waypoint-row')];
     points = [];
     for (const row of rows) {
       const inp = row.querySelector('.waypoint-input');
       if (!inp.value.trim()) continue;
-      if (!inp.dataset.lat) { showToast('Выберите каждый пункт маршрута из списка предложений', 'error'); return; }
+      if (!inp.dataset.lat) {
+        if (navigator.onLine) { showToast('Выберите каждый пункт маршрута из списка предложений', 'error'); return; }
+        points.push({ name: inp.value.trim(), lat: null, lon: null });
+        continue;
+      }
       points.push({ name: inp.dataset.name || inp.value, lat: +inp.dataset.lat, lon: +inp.dataset.lon });
     }
     if (!points.length) { showToast('Добавьте хотя бы один пункт маршрута', 'error'); return; }
@@ -475,9 +544,13 @@ function saveTrip() {
   saveTrips();
   settings.lastCar = car;
   saveSettings();
-  closeModal(tripModal);
+  closeTripModal();
   renderAll();
-  showToast('Поездка сохранена', 'success');
+  showToast(
+    navigator.onLine ? 'Поездка сохранена' : 'Поездка сохранена офлайн. Пересчитайте маршрут при подключении к интернету.',
+    'success',
+    navigator.onLine ? 3200 : 5000
+  );
 }
 tripSaveBtn.addEventListener('click', saveTrip);
 
@@ -547,6 +620,11 @@ function renderTripsList() {
   const filtered = getFilteredTrips();
   if (!filtered.length) {
     tripsListEl.innerHTML = '';
+    const hasAnyTrips = trips.length > 0;
+    emptyState.querySelector('h3').textContent = hasAnyTrips ? 'Ничего не найдено' : 'Поездок пока нет';
+    emptyState.querySelector('p').textContent = hasAnyTrips
+      ? 'Попробуйте изменить поисковый запрос или сбросить фильтр по месяцу/году.'
+      : 'Нажмите «+», чтобы добавить первую поездку.';
     emptyState.classList.remove('hidden');
     return;
   }
@@ -768,9 +846,22 @@ function populateReportSelects() {
   pdfMonth.value = curMonth || String(now.getMonth() + 1).padStart(2, '0');
 }
 
-function exportXlsx() {
-  if (!window.XLSX) { showToast('Библиотека экспорта ещё загружается, попробуйте снова через пару секунд.', 'error'); return; }
+async function exportXlsx() {
   if (!trips.length) { showToast('Нет данных для экспорта', 'error'); return; }
+  showLoading('Подготовка файла Excel…');
+  try {
+    await waitForGlobal('XLSX');
+  } catch {
+    hideLoading();
+    showToast(
+      navigator.onLine
+        ? 'Не удалось загрузить библиотеку экспорта. Обновите страницу и попробуйте ещё раз.'
+        : 'Экспорт в Excel недоступен офлайн при первой загрузке приложения. Подключитесь к интернету и повторите попытку.',
+      'error'
+    );
+    return;
+  }
+  hideLoading();
   const rows = trips.slice().sort((a, b) => a.date.localeCompare(b.date)).map(t => ({
     'Дата': formatDateRu(t.date),
     'Тип': t.type === 'city' ? 'В городе' : 'За город',
@@ -789,12 +880,24 @@ function exportXlsx() {
 exportXlsxBtn.addEventListener('click', exportXlsx);
 
 async function exportPdf() {
-  if (!window.jspdf || !window.html2canvas) { showToast('Библиотека формирования PDF ещё загружается, попробуйте снова через пару секунд.', 'error'); return; }
   const year = pdfYear.value, month = pdfMonth.value;
   const list = trips.filter(t => t.date.slice(0, 4) === year && t.date.slice(5, 7) === month).sort((a, b) => a.date.localeCompare(b.date));
   if (!list.length) { showToast('За выбранный период поездок нет', 'error'); return; }
 
   showLoading('Формирование PDF…');
+  try {
+    await waitForGlobal('jspdf');
+    await waitForGlobal('html2canvas');
+  } catch {
+    hideLoading();
+    showToast(
+      navigator.onLine
+        ? 'Не удалось загрузить библиотеку формирования PDF. Обновите страницу и попробуйте ещё раз.'
+        : 'Экспорт в PDF недоступен офлайн при первой загрузке приложения. Подключитесь к интернету и повторите попытку.',
+      'error'
+    );
+    return;
+  }
   const totalKm = list.reduce((s, t) => s + (t.km || 0), 0);
   const consumption = parseFloat(fuelConsumptionInput.value) || 0;
   const price = parseFloat(fuelPriceInput.value) || 0;
@@ -835,17 +938,39 @@ async function exportPdf() {
   document.body.appendChild(container);
 
   try {
+    // Растеризуем весь отчёт целиком (сохраняет кириллицу, т.к. jsPDF без
+    // встроенного кириллического шрифта рисует текст только латиницей),
+    // затем нарезаем получившийся канвас на срезы по высоте страницы A4 —
+    // это даёт автоматическую разбивку на страницы для отчётов любой длины.
+    const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff' });
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-    await doc.html(container, {
-      x: 20, y: 20, width: 555, windowWidth: 750,
-      callback: (docInner) => {
-        docInner.save(`Отчет_${MONTHS_NOM[+month - 1]}_${year}.pdf`);
-        container.remove();
-        hideLoading();
-        showToast('PDF отчёт сформирован', 'success');
-      }
-    });
+    const margin = 20;
+    const usableWidth = doc.internal.pageSize.getWidth() - margin * 2;
+    const usableHeight = doc.internal.pageSize.getHeight() - margin * 2;
+    const pxToPt = usableWidth / canvas.width;
+    const pageHeightPx = usableHeight / pxToPt;
+
+    let renderedPx = 0;
+    let pageIndex = 0;
+    while (renderedPx < canvas.height) {
+      const sliceHeightPx = Math.min(pageHeightPx, canvas.height - renderedPx);
+      const pageCanvas = document.createElement('canvas');
+      pageCanvas.width = canvas.width;
+      pageCanvas.height = sliceHeightPx;
+      pageCanvas.getContext('2d').drawImage(
+        canvas, 0, renderedPx, canvas.width, sliceHeightPx, 0, 0, canvas.width, sliceHeightPx
+      );
+      if (pageIndex > 0) doc.addPage();
+      doc.addImage(pageCanvas.toDataURL('image/png'), 'PNG', margin, margin, usableWidth, sliceHeightPx * pxToPt);
+      renderedPx += sliceHeightPx;
+      pageIndex += 1;
+    }
+
+    doc.save(`Отчет_${MONTHS_NOM[+month - 1]}_${year}.pdf`);
+    container.remove();
+    hideLoading();
+    showToast(`PDF отчёт сформирован (${pageIndex} стр.)`, 'success');
   } catch (e) {
     container.remove();
     hideLoading();
